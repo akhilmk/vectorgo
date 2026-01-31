@@ -5,6 +5,14 @@
 
 services:
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: always
+    networks:
+      - flowise_default
+
   chromadb:
     image: chromadb/chroma:latest
     ports:
@@ -24,3 +32,4 @@ networks:
 
 volumes:
   chroma_data:
+  ollama_data:
