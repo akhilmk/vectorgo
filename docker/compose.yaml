@@ -1,0 +1,71 @@
+name: vectorgo
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: vectorgo-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: always
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: vectorgo-chromadb
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+    restart: always
+
+  vectorgo-app:
+    image: ${APP_IMAGE}:${APP_IMAGE_TAG}
+    container_name: vectorgo-app
+    restart: always
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - CHROMA_URL=http://chromadb:8000
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - COLLECTION_NAME=${COLLECTION_NAME}
+      - PORT=${PORT}
+    depends_on:
+      - ollama
+      - chromadb
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vectorgo-app.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.vectorgo-app.entrypoints=websecure"
+      - "traefik.http.routers.vectorgo-app.tls.certresolver=myresolver"
+      - "traefik.http.services.vectorgo-app.loadbalancer.server.port=${PORT}"
+
+  traefik:
+    image: traefik:v2.11
+    container_name: vectorgo-traefik
+    restart: always
+    environment:
+      - "DOCKER_HOST=unix:///var/run/docker.sock"
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL:-admin@example.com}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      # Redirect HTTP to HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-8081}:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "letsencrypt_data:/letsencrypt"
+    security_opt:
+      - label:disable
+
+volumes:
+  ollama_data:
+  chroma_data:
+  letsencrypt_data:
