@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { api } from "../api";
+
   let query = "";
   let searching = false;
   let results: any = null;
@@ -15,14 +17,7 @@
     results = null;
 
     try {
-      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || "Search failed");
-      }
-
-      results = await response.json();
+      results = await api.searchVectors(query);
       
       if (!results.documents || !results.documents[0] || results.documents[0].length === 0) {
         error = "No results found";

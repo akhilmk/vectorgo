@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { api } from "../api";
+
   let file: File | null = null;
   let chunkSize = 100;
   let chunkStride = 80;
@@ -36,17 +38,7 @@
       formData.append("chunkSize", chunkSize.toString());
       formData.append("chunkStride", chunkStride.toString());
 
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || "Upload failed");
-      }
-
-      const result = await response.json();
+      const result = await api.uploadPDF(formData);
       message = `Successfully processed ${result.filename}`;
       messageType = "success";
       file = null;
