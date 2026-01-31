@@ -1,12 +1,20 @@
 <script lang="ts">
   import { api } from "../api";
+  import { uploadStore } from "../uploadStore";
+
+  export let onUploadComplete: (() => void) | undefined = undefined;
 
   let file: File | null = null;
   let chunkSize = 100;
   let chunkStride = 80;
-  let uploading = false;
   let message = "";
   let messageType: "success" | "error" | "" = "";
+  
+  // Subscribe to upload store to get uploading state
+  let uploading = false;
+  uploadStore.subscribe(state => {
+    uploading = state.uploading;
+  });
 
   function handleFileChange(event: Event) {
     const target = event.target as HTMLInputElement;
@@ -29,8 +37,9 @@
       return;
     }
 
-    uploading = true;
     message = "";
+    const controller = new AbortController();
+    uploadStore.startUpload(file.name, controller);
 
     try {
       const formData = new FormData();
@@ -38,31 +47,38 @@
       formData.append("chunkSize", chunkSize.toString());
       formData.append("chunkStride", chunkStride.toString());
 
-      const result = await api.uploadPDF(formData);
+      const result = await api.uploadPDF(
+        formData,
+        (status) => {
+          uploadStore.updateProgress(status);
+        },
+        controller.signal
+      );
+      
       message = `Successfully processed ${result.filename}`;
       messageType = "success";
+      uploadStore.completeUpload();
       file = null;
       
       // Reset file input
       const fileInput = document.getElementById("file-input") as HTMLInputElement;
       if (fileInput) fileInput.value = "";
       
+      // Notify parent component
+      if (onUploadComplete) {
+        onUploadComplete();
+      }
+      
     } catch (error) {
-      message = error instanceof Error ? error.message : "Upload failed";
+      const errorMsg = error instanceof Error ? error.message : "Upload failed";
+      message = errorMsg;
       messageType = "error";
-    } finally {
-      uploading = false;
+      uploadStore.reset();
     }
   }
 </script>
 
-<div class="bg-white rounded-2xl shadow-lg p-8 border border-indigo-100">
-  <h2 class="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
-    <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-    </svg>
-    Upload PDF
-  </h2>
+  <h2 class="hidden">Upload PDF</h2>
 
   <div class="space-y-6">
     <!-- File Input -->
@@ -75,10 +91,14 @@
         type="file"
         accept=".pdf"
         on:change={handleFileChange}
-        class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        disabled={uploading}
+        class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
       />
       {#if file}
-        <p class="mt-2 text-sm text-slate-600">Selected: <span class="font-medium">{file.name}</span></p>
+        <p class="mt-2 text-sm text-slate-600">
+          Selected: <span class="font-medium">{file.name}</span>
+          <span class="text-slate-500">({(file.size / (1024 * 1024)).toFixed(2)} MB)</span>
+        </p>
       {/if}
     </div>
 
@@ -92,9 +112,10 @@
           id="chunk-size"
           type="number"
           bind:value={chunkSize}
+          disabled={uploading}
           min="10"
           max="1000"
-          class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
         />
         <p class="mt-1 text-xs text-slate-500">Number of words per chunk</p>
       </div>
@@ -107,9 +128,10 @@
           id="chunk-stride"
           type="number"
           bind:value={chunkStride}
+          disabled={uploading}
           min="1"
           max="1000"
-          class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
         />
         <p class="mt-1 text-xs text-slate-500">Step size between chunks (overlap = size - stride)</p>
       </div>
@@ -143,4 +165,3 @@
       </div>
     {/if}
   </div>
-</div>

@@ -38,13 +38,7 @@
   }
 </script>
 
-<div class="bg-white rounded-2xl shadow-lg p-8 border border-indigo-100">
-  <h2 class="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
-    <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-    </svg>
-    Search Documents
-  </h2>
+  <h2 class="hidden">Search Documents</h2>
 
   <div class="space-y-6">
     <!-- Search Input -->
@@ -119,4 +113,3 @@
       </div>
     {/if}
   </div>
-</div>

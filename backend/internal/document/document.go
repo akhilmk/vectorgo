@@ -10,9 +10,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/dslipak/pdf"
 	"github.com/google/uuid"
+	"github.com/ledongthuc/pdf"
 )
 
 type Config struct {
@@ -50,6 +51,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mw func(http.HandlerFunc) h
 	mux.HandleFunc("/api/reset", mw(h.HandleReset))
 	mux.HandleFunc("/api/upload", mw(h.HandleUpload))
 	mux.HandleFunc("/api/search", mw(h.HandleSearch))
+	mux.HandleFunc("/api/stats", mw(h.HandleStats))
+	mux.HandleFunc("/api/files/", mw(h.HandleDeleteFile))
 }
 
 // Request/Response Structs
@@ -79,6 +82,31 @@ type ChromaQueryResponse struct {
 	Documents [][]string      `json:"documents"`
 	Metadatas [][]interface{} `json:"metadatas"`
 	Distances [][]float32     `json:"distances"`
+}
+
+type ChromaGetResponse struct {
+	ID       string      `json:"id"`
+	Name     string      `json:"name"`
+	Metadata interface{} `json:"metadata"`
+}
+
+type ChromaCountResponse struct {
+	Count int `json:"count"`
+}
+
+type ChromaDeleteRequest struct {
+	Where map[string]interface{} `json:"where"`
+}
+
+type ChromaDeleteResponse struct {
+	DeletedCount int `json:"deleted_count"`
+}
+
+type StatsResponse struct {
+	TotalChunks     int            `json:"total_chunks"`
+	TotalFiles      int            `json:"total_files"`
+	Files           []string       `json:"files"`
+	FileChunkCounts map[string]int `json:"file_chunk_counts"`
 }
 
 // Handlers
@@ -137,7 +165,9 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	log.Printf("Received file: %s (size: %d bytes)", header.Filename, header.Size)
+	// Log upload start with file details
+	log.Printf("[UPLOAD START] File: %s | Size: %d bytes (%.2f MB)",
+		header.Filename, header.Size, float64(header.Size)/(1024*1024))
 
 	// Get chunk parameters
 	chunkSize := 100
@@ -155,7 +185,8 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Processing with chunk size: %d, stride: %d", chunkSize, chunkStride)
+	log.Printf("[UPLOAD CONFIG] File: %s | Chunk size: %d words | Stride: %d words | Overlap: %d words",
+		header.Filename, chunkSize, chunkStride, chunkSize-chunkStride)
 
 	// Save file temporarily
 	tmpFile, err := os.CreateTemp("", "upload-*.pdf")
@@ -168,19 +199,39 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	_, err = io.Copy(tmpFile, file)
 	if err != nil {
+		log.Printf("[UPLOAD ERROR] File: %s | Failed to save: %v", header.Filename, err)
 		http.Error(w, fmt.Sprintf("failed to save file: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	log.Printf("[UPLOAD SAVED] File: %s | Temp path: %s", header.Filename, tmpFile.Name())
+
 	// Process PDF
-	err = h.processPDF(tmpFile.Name(), header.Filename, chunkSize, chunkStride)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to process PDF: %v", err), http.StatusInternalServerError)
+	// Process PDF with progress updates
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("Successfully processed: %s", header.Filename)
-	w.Header().Set("Content-Type", "application/json")
+	progressFunc := func(msg string) {
+		json.NewEncoder(w).Encode(map[string]string{"status": msg})
+		flusher.Flush()
+	}
+
+	err = h.processPDF(tmpFile.Name(), header.Filename, chunkSize, chunkStride, progressFunc)
+	if err != nil {
+		log.Printf("Error processing PDF: %v", err)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	log.Printf("[UPLOAD COMPLETE] File: %s | Processing finished successfully", header.Filename)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":      "completed",
 		"filename":    header.Filename,
@@ -219,38 +270,221 @@ func (h *Handler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+func (h *Handler) HandleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	log.Printf("Fetching collection statistics")
+
+	// Get or create collection to ensure it exists
+	colID, err := h.getOrCreateCollection(h.config.Collection)
+	if err != nil {
+		log.Printf("Failed to get collection: %v", err)
+		// Return empty stats if collection doesn't exist
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(StatsResponse{
+			TotalChunks:     0,
+			TotalFiles:      0,
+			Files:           []string{},
+			FileChunkCounts: make(map[string]int),
+		})
+		return
+	}
+
+	// Get collection count
+	countURL := fmt.Sprintf("%s%s/%s/count", h.config.ChromaURL, h.config.ChromaAPIBase, colID)
+	resp, err := http.Get(countURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to get count: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, fmt.Sprintf("chroma count error: %s", string(body)), http.StatusInternalServerError)
+		return
+	}
+
+	var count int
+	if err := json.NewDecoder(resp.Body).Decode(&count); err != nil {
+		http.Error(w, fmt.Sprintf("failed to decode count: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get all documents to extract unique filenames and count chunks per file
+	files := []string{}
+	fileChunkCounts := make(map[string]int)
+
+	if count > 0 {
+
+		getURL := fmt.Sprintf("%s%s/%s/get", h.config.ChromaURL, h.config.ChromaAPIBase, colID)
+
+		// Request all metadata to find unique files and count chunks
+		reqBody, _ := json.Marshal(map[string]interface{}{
+			"limit":   count,
+			"include": []string{"metadatas"},
+		})
+
+		getResp, err := http.Post(getURL, "application/json", bytes.NewBuffer(reqBody))
+		if err == nil {
+			defer getResp.Body.Close()
+			if getResp.StatusCode == http.StatusOK {
+				var data struct {
+					Metadatas []map[string]interface{} `json:"metadatas"`
+				}
+				if err := json.NewDecoder(getResp.Body).Decode(&data); err == nil {
+					fileSet := make(map[string]bool)
+					for _, meta := range data.Metadatas {
+						if filename, ok := meta["filename"].(string); ok {
+							fileSet[filename] = true
+							fileChunkCounts[filename]++
+						}
+					}
+					for filename := range fileSet {
+						files = append(files, filename)
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("Collection stats: %d chunks, %d files", count, len(files))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(StatsResponse{
+		TotalChunks:     count,
+		TotalFiles:      len(files),
+		Files:           files,
+		FileChunkCounts: fileChunkCounts,
+	})
+}
+
+func (h *Handler) HandleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract filename from URL path
+	filename := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	if filename == "" {
+		http.Error(w, "Filename required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Deleting file: %s", filename)
+
+	// Get collection ID
+	colID, err := h.getOrCreateCollection(h.config.Collection)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to get collection: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete all chunks with matching filename
+	reqBody, _ := json.Marshal(ChromaDeleteRequest{
+		Where: map[string]interface{}{
+			"filename": filename,
+		},
+	})
+
+	url := fmt.Sprintf("%s%s/%s/delete", h.config.ChromaURL, h.config.ChromaAPIBase, colID)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, fmt.Sprintf("chroma delete error: %s", string(body)), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Successfully deleted file: %s", filename)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "deleted",
+		"filename": filename,
+	})
+}
+
 // Helpers
 
-func (h *Handler) processPDF(path, filename string, chunkSize, chunkStride int) error {
-	content, err := ReadPDF(path)
+func (h *Handler) processPDF(path, filename string, chunkSize, chunkStride int, progress func(string)) error {
+	log.Printf("[PDF PROCESSING START] File: %s | Path: %s", filename, path)
+
+	if progress != nil {
+		progress("Reading PDF file...")
+	}
+
+	content, err := ReadPDF(path, filename, progress)
 	if err != nil {
+		log.Printf("[PDF ERROR] File: %s | Failed to read: %v", filename, err)
 		return fmt.Errorf("failed to read PDF: %v", err)
 	}
 
-	log.Printf("Extracted %d characters from PDF", len(content))
+	// Report extracted content size
+	contentLen := len(content)
+	trimmedLen := len(strings.TrimSpace(content))
+	log.Printf("[PDF EXTRACTION] File: %s | Extracted: %d chars | Trimmed: %d chars",
+		filename, contentLen, trimmedLen)
+
+	if progress != nil {
+		progress(fmt.Sprintf("Extracted %d characters from PDF", contentLen))
+	}
+
+	if trimmedLen == 0 {
+		log.Printf("[PDF ERROR] File: %s | No text content extracted (possibly scanned/image-based PDF)", filename)
+		return fmt.Errorf("no text content extracted from PDF (file might be scanned or image-based)")
+	}
+
+	if progress != nil {
+		progress("Splitting text into chunks...")
+	}
 
 	chunks := ChunkText(content, chunkSize, chunkStride)
-	log.Printf("Split PDF into %d chunks (size: %d words, stride: %d words)", len(chunks), chunkSize, chunkStride)
+	log.Printf("[PDF CHUNKING] File: %s | Total chunks: %d | Chunk size: %d words | Stride: %d words",
+		filename, len(chunks), chunkSize, chunkStride)
+
+	if len(chunks) == 0 {
+		log.Printf("[PDF ERROR] File: %s | Resulted in 0 chunks (text too short)", filename)
+		return fmt.Errorf("resulted in 0 chunks (text might be too short)")
+	}
+
+	if progress != nil {
+		progress(fmt.Sprintf("Created %d chunks - Starting embedding...", len(chunks)))
+	}
 
 	for i, chunk := range chunks {
-		log.Printf("Processing chunk %d/%d (length: %d chars)", i+1, len(chunks), len(chunk))
+		msg := fmt.Sprintf("Processing chunk %d/%d", i+1, len(chunks))
+		if progress != nil {
+			progress(msg)
+		}
+		log.Printf("[CHUNK PROCESSING] File: %s | Chunk: %d/%d | Length: %d chars",
+			filename, i+1, len(chunks), len(chunk))
 
 		embedding, err := h.getEmbedding(chunk)
 		if err != nil {
-			log.Printf("WARNING: failed to get embedding for chunk %d: %v", i+1, err)
+			log.Printf("[CHUNK WARNING] File: %s | Chunk: %d/%d | Embedding failed: %v",
+				filename, i+1, len(chunks), err)
 			continue
 		}
 
 		err = h.addToChroma(chunk, embedding, filename, i+1)
 		if err != nil {
-			log.Printf("WARNING: failed to add chunk %d to chroma: %v", i+1, err)
+			log.Printf("[CHUNK WARNING] File: %s | Chunk: %d/%d | Storage failed: %v",
+				filename, i+1, len(chunks), err)
 			continue
 		}
 
-		log.Printf("Successfully stored chunk %d/%d", i+1, len(chunks))
+		log.Printf("[CHUNK SUCCESS] File: %s | Stored chunk: %d/%d", filename, i+1, len(chunks))
 	}
 
-	log.Printf("Completed processing all %d chunks", len(chunks))
+	log.Printf("[PDF PROCESSING COMPLETE] File: %s | Total chunks: %d", filename, len(chunks))
 	return nil
 }
 
@@ -289,9 +523,10 @@ func (h *Handler) addToChroma(text string, embedding []float32, filename string,
 	reqBody, _ := json.Marshal(ChromaAddRequest{
 		Documents: []string{text},
 		Metadatas: []interface{}{map[string]interface{}{
-			"source":    "pdf",
-			"filename":  filename,
-			"chunk_num": chunkNum,
+			"source":      "pdf",
+			"filename":    filename,
+			"chunk_num":   chunkNum,
+			"uploaded_at": time.Now().Format(time.RFC3339),
 		}},
 		Ids:        []string{id},
 		Embeddings: [][]float32{embedding},
@@ -389,20 +624,61 @@ func (h *Handler) getOrCreateCollection(name string) (string, error) {
 }
 
 // ReadPDF extracts plain text from a PDF file at the given path.
-func ReadPDF(path string) (string, error) {
-	r, err := pdf.Open(path)
+func ReadPDF(path, filename string, progress func(string)) (string, error) {
+	f, r, err := pdf.Open(path)
 	if err != nil {
+		log.Printf("[PDF OPEN ERROR] File: %s | Error: %v", filename, err)
 		return "", err
 	}
+	defer f.Close()
+
+	total := r.NumPage()
+	log.Printf("[PDF READING] File: %s | Total pages: %d", filename, total)
+
 	var buf bytes.Buffer
-	b, err := r.GetPlainText()
-	if err != nil {
-		return "", err
+
+	for i := 1; i <= total; i++ {
+		// Report progress more frequently for large PDFs
+		if progress != nil {
+			if total < 20 || i%5 == 0 || i == 1 || i == total {
+				progress(fmt.Sprintf("Reading PDF page %d/%d", i, total))
+			}
+		}
+
+		p := r.Page(i)
+		if p.V.IsNull() {
+			log.Printf("[PDF PAGE SKIP] File: %s | Page: %d/%d | Reason: null page", filename, i, total)
+			continue
+		}
+
+		type pageResult struct {
+			text string
+			err  error
+		}
+		ch := make(chan pageResult, 1)
+		go func() {
+			text, err := p.GetPlainText(nil)
+			ch <- pageResult{text, err}
+		}()
+
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				log.Printf("[PDF PAGE ERROR] File: %s | Page: %d/%d | Error: %v", filename, i, total, res.err)
+				continue
+			}
+			buf.WriteString(res.text)
+		case <-time.After(10 * time.Second):
+			log.Printf("[PDF PAGE TIMEOUT] File: %s | Page: %d/%d | Skipping after 10s", filename, i, total)
+			if progress != nil {
+				progress(fmt.Sprintf("Skipped page %d (timeout)", i))
+			}
+			continue
+		}
 	}
-	_, err = io.Copy(&buf, b)
-	if err != nil {
-		return "", err
-	}
+
+	log.Printf("[PDF READING COMPLETE] File: %s | Pages processed: %d | Text length: %d chars",
+		filename, total, buf.Len())
 	return buf.String(), nil
 }
 
