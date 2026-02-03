@@ -1,13 +1,13 @@
 # use this compose with existing traefik setup
 
 name: ${COMPOSE_NAME}
-
 services:
   # Base Profile: Flowise
   flowise-db:
     image: postgres:16-alpine
     restart: always
-    profiles: ["flowise"]
+    profiles:
+      - flowise
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -15,17 +15,19 @@ services:
     volumes:
       - flowise-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}
       interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - default
-
   flowise:
     image: flowiseai/flowise:3.0.12
     restart: always
-    profiles: ["flowise"]
+    profiles:
+      - flowise
     environment:
       - PORT=${FLOWISE_PORT}
       - FLOWISE_USERNAME=${FLOWISE_USERNAME}
@@ -49,26 +51,26 @@ services:
       - default
       - traefik-proxy
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=${TRAEFIK_NETWORK}"
-      - "traefik.http.routers.flowise.rule=Host(`${FLOWISE_SUBDOMAIN}.${DOMAIN_NAME}`)"
-      - "traefik.http.routers.flowise.entrypoints=websecure"
-      - "traefik.http.routers.flowise.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
-      - "traefik.http.services.flowise.loadbalancer.server.port=${FLOWISE_PORT}"
-
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.flowise.rule=Host(`${FLOWISE_SUBDOMAIN}.${DOMAIN_NAME}`)
+      - traefik.http.routers.flowise.entrypoints=websecure
+      - traefik.http.routers.flowise.tls.certresolver=${TRAEFIK_CERT_RESOLVER}
+      - traefik.http.services.flowise.loadbalancer.server.port=${FLOWISE_PORT}
   # Profile: Upload (gowise Stack)
   ollama:
     image: ollama/ollama:0.15.4
-    profiles: ["upload"]
+    profiles:
+      - upload
     volumes:
       - ollama_data:/root/.ollama
     restart: always
     networks:
       - default
-
   chromadb:
     image: chromadb/chroma:1.4.1
-    profiles: ["upload"]
+    profiles:
+      - upload
     # ports:
     #   - "127.0.0.1:8000:8000"
     volumes:
@@ -83,11 +85,11 @@ services:
     restart: always
     networks:
       - default
-
   gowise:
     image: ${APP_IMAGE}:${APP_IMAGE_TAG}
     restart: always
-    profiles: ["upload"]
+    profiles:
+      - upload
     environment:
       - OLLAMA_URL=${OLLAMA_URL}
       - CHROMA_URL=${CHROMA_URL}
@@ -104,21 +106,19 @@ services:
       - default
       - traefik-proxy
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=${TRAEFIK_NETWORK}"
-      - "traefik.http.routers.gowise.rule=Host(`${GOWISE_SUBDOMAIN}.${DOMAIN_NAME}`)"
-      - "traefik.http.routers.gowise.entrypoints=websecure"
-      - "traefik.http.routers.gowise.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
-      - "traefik.http.services.gowise.loadbalancer.server.port=${APP_PORT}"
-
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.gowise.rule=Host(`${GOWISE_SUBDOMAIN}.${DOMAIN_NAME}`)
+      - traefik.http.routers.gowise.entrypoints=websecure
+      - traefik.http.routers.gowise.tls.certresolver=${TRAEFIK_CERT_RESOLVER}
+      - traefik.http.services.gowise.loadbalancer.server.port=${APP_PORT}
 networks:
-  default:
+  default: null
   traefik-proxy:
     external: true
     name: ${TRAEFIK_NETWORK}
-
 volumes:
-  flowise-db-data:
-  flowise-data:
-  chroma_data:
-  ollama_data:
+  flowise-db-data: null
+  flowise-data: null
+  chroma_data: null
+  ollama_data: null
